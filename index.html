@@ -298,9 +298,10 @@ a.btn{text-decoration:none}
   radial-gradient(120% 90% at 50% 0%, rgba(92,132,230,.10), transparent 60%), var(--bg);
   border:1px solid var(--line);touch-action:pan-y;cursor:grab}
 #simCanvas.dragging{cursor:grabbing}
-.sim-bar{display:flex;gap:8px;margin-top:10px}
-.sim-btn{flex:1;padding:9px 10px;border-radius:10px;border:1px solid var(--line);
-  background:var(--panel-2);color:var(--fg);font-size:12px;font-weight:600;cursor:pointer}
+.sim-bar{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}
+.sim-btn{flex:1 1 30%;min-width:0;padding:9px 6px;border-radius:10px;border:1px solid var(--line);
+  background:var(--panel-2);color:var(--fg);font-size:11.5px;font-weight:600;cursor:pointer;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sim-btn.on{border-color:var(--accent);color:var(--accent-2);box-shadow:0 0 0 2px rgba(92,132,230,.15)}
 .sim-legend{display:flex;flex-wrap:wrap;gap:6px 12px;margin-top:10px;font-size:10.5px;color:var(--muted)}
 .sim-legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:-1px}
@@ -1830,6 +1831,7 @@ function renderResult(){
           <div class="sim-bar">
             <button class="sim-btn" id="simPlay" onclick="SIM3D.togglePlay()">▶ 데모 재생</button>
             <button class="sim-btn" onclick="SIM3D.fitView()">⟳ 시점 초기화</button>
+            <button class="sim-btn" id="simCine" onclick="SIM3D.toggleCinema()">🎬 영상 모드</button>
             <button class="sim-btn" id="simSpeed" onclick="SIM3D.cycleSpeed()">속도 1×</button>
             <button class="sim-btn" id="simFsBtn" onclick="SIM3D.toggleFull()">⛶ 전체화면</button>
           </div>
@@ -2407,7 +2409,7 @@ const SIM2D = {
    [SIM3D-GL] three.js WebGL 렌더러 — 실사풍 자동창고
    ============================================================ */
 const GL3D = {
-  THREE:null, inited:false, speed:1,
+  THREE:null, inited:false, speed:1, cinema:false, freeCam:null,
   renderer:null, scene:null, camera:null, canvas:null,
   target:null, sph:{theta:-0.6, phi:1.02, r:40}, vel:{t:0,p:0},
   raf:0, playing:false, animT:0, lastNow:0, needsRender:false, io:null,
@@ -2498,6 +2500,7 @@ const GL3D = {
 
     // 조명
     const hemi=new T.HemisphereLight(mood.sky, 0x8894A6, 1.35); this.scene.add(hemi);   // 밝은 실내 (영상 기준)
+    this._hemi=hemi;
     const cellsShown=D.sBay*(D.sDF+D.sDB)*D.sTier;
     const useShadow = cellsShown<=3000;
     const sun=new T.DirectionalLight(0xffffff, 1.5);
@@ -3040,6 +3043,16 @@ const GL3D = {
 
   /* ---------- 카메라/오빗 ---------- */
   applyCam(){
+    // 영상 모드에서는 카메라 위치를 직접 지정 (freeCam)
+    if(this.freeCam){
+      const f=this.freeCam;
+      this.camera.position.set(f.px,f.py,f.pz);
+      this.camera.lookAt(f.tx,f.ty,f.tz);
+      const d=Math.hypot(f.px-f.tx,f.py-f.ty,f.pz-f.tz);
+      if(this.scene&&this.scene.fog){ this.scene.fog.near=d*0.5; this.scene.fog.far=d*4.5+40; }
+      if(this.camera.far < d*4+60){ this.camera.far=d*4+60; this.camera.updateProjectionMatrix(); }
+      return;
+    }
     const s=this.sph, c=this.center;
     this.camera.position.set(
       c.x + s.r*Math.sin(s.phi)*Math.sin(s.theta),
@@ -3049,6 +3062,85 @@ const GL3D = {
     // 안개·far 평면을 카메라 거리에 연동 (줌아웃 시 씬이 안개에 묻히지 않도록)
     if(this.scene&&this.scene.fog){ this.scene.fog.near=s.r*0.45; this.scene.fog.far=s.r*2.3; }
     if(this.camera.far < s.r*3){ this.camera.far=s.r*3; this.camera.updateProjectionMatrix(); }
+  },
+
+  /* ============ 시네마틱 카메라 ============
+     TSPG 공식 영상(youtu.be/DRaWEaTcmBI)의 샷 구성을 20초 루프에 맞춰 재현.
+     각 샷은 카메라 위치(p)와 주시점(t)을 보간하고, 경계는 0.5초 블렌드로 잇는다. */
+  CAM_BLEND: 0.5,
+  camShots(){
+    const D=this.D, A=this.anchors, ac=this.actors;
+    const W=D.rackW, H=D.rackH, TD=this.center.z*2+2;
+    const sh=(ac.shuttles&&ac.shuttles[0])||null;
+    const cage=ac.carriage;
+    const L=(a,b,k)=>a+(b-a)*k;
+    const E=k=>this.ease(k);
+    // 각 샷: {end, f(k)->{p:[x,y,z], t:[x,y,z]}}
+    return [
+      // ① 0~5s 입고 와이드 — 컨베이어를 따라 우측 슬로우 팬
+      {end:5.0, f:k=>({
+        p:[L(A.convStart.x-13, A.convStart.x-9, E(k)), 6.5, L(A.convStart.z-9, A.convStart.z+2, E(k))],
+        t:[L(A.convStart.x, A.convEnd.x, E(k)), 1.4, L(A.convStart.z, A.convEnd.z-2, E(k))] })},
+      // ② 5~7.2s 턴테이블 줌인 (미디엄)
+      {end:7.2, f:k=>({
+        p:[A.convEnd.x-L(7.0,3.4,E(k)), L(4.2,2.4,E(k)), A.convEnd.z-L(6.0,3.0,E(k))],
+        t:[A.convEnd.x, 0.9, A.convEnd.z-1.5] })},
+      // ③ 7.2~11.4s 리프트 상승 틸트업 (사이드 앵글)
+      {end:11.4, f:k=>({
+        p:[A.convEnd.x-8.5, L(2.6, H*0.75, E(k)), A.convEnd.z-4.5],
+        t:[A.convEnd.x, cage?cage.position.y+0.5:L(1,H,k), A.convEnd.z] })},
+      // ④ 11.4~13.6s 통로 로우앵글 — 통로 끝에서 접근하는 셔틀을 정면으로
+      {end:13.6, f:k=>({
+        p:[W+L(7,4.5,E(k)), A.liftTopY+0.9, A.railZ],
+        t:[sh?sh.position.x:A.railFromX, A.liftTopY+0.1, A.railZ] })},
+      // ⑤ 13.6~17.2s 셔틀 뒤 트래킹 (드론/슬라이더)
+      {end:17.2, f:k=>{
+        const sx=sh?sh.position.x:L(A.railFromX,A.railToX,k);
+        return { p:[sx-4.2, A.liftTopY+1.9, A.railZ-5.2], t:[sx+1.2, A.liftTopY, A.railZ] }; }},
+      // ⑥ 17.2~20s 오버헤드 부감 → 줌아웃 스케일 리빌
+      {end:this.LOOP, f:k=>{
+        const kk=E(k);
+        return { p:[L(W*0.55, W*0.5-W*0.75, kk), L(H+9, H+Math.max(26,W*0.9), kk), L(TD*0.35, TD*1.05, kk)],
+                 t:[W*0.5, L(H*0.7, H*0.45, kk), TD*0.45] }; }}
+    ];
+  },
+  camTick(t){
+    const shots=this.camShots();
+    let s0=0, idx=0;
+    for(let i=0;i<shots.length;i++){ if(t<shots[i].end){ idx=i; break; } s0=shots[i].end; idx=i+1; }
+    if(idx>=shots.length) idx=shots.length-1;
+    const st=shots[idx], len=Math.max(0.001, st.end-s0);
+    const k=Math.max(0, Math.min(1, (t-s0)/len));
+    let v=st.f(k);
+    // 샷 경계 블렌드 — 다음 샷 시작값과 섞어 하드컷 방지
+    const B=this.CAM_BLEND;
+    if(k>1-B/len && idx<shots.length-1){
+      const n=shots[idx+1].f(0);
+      const b=(k-(1-B/len))/(B/len);
+      const m=E=>E, kb=this.ease(b);
+      v={ p:v.p.map((x,i)=>x+(n.p[i]-x)*kb), t:v.t.map((x,i)=>x+(n.t[i]-x)*kb) };
+    }
+    this.freeCam={px:v.p[0],py:v.p[1],pz:v.p[2], tx:v.t[0],ty:v.t[1],tz:v.t[2]};
+  },
+  setCinema(on){
+    this.cinema=!!on;
+    if(!on){ this.freeCam=null; this.applyCam(); this.render(); }
+  },
+  /* 밝은 창고 환경 — 영상의 "clean white, bright even lighting" 재현 */
+  setBright(on){
+    if(!this.scene) return;
+    const T=this.THREE, mood=this.MOOD[this.D.d.temp]||this.MOOD.ambient;
+    if(on){
+      if(!this._darkBg) this._darkBg={bg:this.scene.background.getHex(), fog:this.scene.fog.color.getHex()};
+      this.scene.background=new T.Color(0xE9EEF5);
+      this.scene.fog.color.setHex(0xDDE4EE);
+      if(this._hemi) this._hemi.intensity=1.85;
+    } else if(this._darkBg){
+      this.scene.background=new T.Color(this._darkBg.bg);
+      this.scene.fog.color.setHex(this._darkBg.fog);
+      if(this._hemi) this._hemi.intensity=1.35;
+    }
+    this.render();
   },
   fitView(){
     if(!this.camera) return;
@@ -3074,6 +3166,8 @@ const GL3D = {
     const cv=this.canvas, ptrs=new Map(); let rot=false, lx=0, ly=0, pinch0=0, r0=0, lastTap=0;
     const clampR=v=>Math.max(8, Math.min(this.bound*4, v));
     cv.addEventListener("pointerdown",e=>{
+      // 직접 조작하면 영상 모드 해제 (카메라 소유권을 사용자에게)
+      if(this.cinema && SIM3D.cinemaOff) SIM3D.cinemaOff();
       ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY});
       lx=e.clientX; ly=e.clientY; rot=false; this.vel.t=0; this.vel.p=0;
       if(ptrs.size===2){ const a=[...ptrs.values()]; pinch0=Math.hypot(a[0].x-a[1].x,a[0].y-a[1].y); r0=this.sph.r; }
@@ -3136,6 +3230,7 @@ const GL3D = {
       this.animT=(this.animT+(now-this.lastNow)/1000*(this.speed||1))%this.LOOP;
       this.lastNow=now;
       this.tick(this.animT);
+      if(this.cinema){ this.camTick(this.animT); this.applyCam(); }
       this.renderer.render(this.scene,this.camera);
       this.raf=requestAnimationFrame(loop);
     };
@@ -3356,6 +3451,25 @@ const SIM3D = {
   togglePlay(){ if(this.engine) this.engine.togglePlay(); },
   stop(){ if(this.engine) this.engine.stop(); },
   fitView(){ if(this.engine) this.engine.fitView(); },
+  /* 영상 모드 — 공식 영상 샷 구성대로 카메라가 공정을 따라간다 (three 엔진 전용) */
+  toggleCinema(){
+    const e=this.engine;
+    if(!e||!e.setCinema){ return; }              // 2D 폴백은 미지원
+    const on=!e.cinema;
+    e.setCinema(on);
+    if(on){ e.setBright(true); if(!e.playing) e.togglePlay(); }
+    else  { e.setBright(false); e.fitView(); }
+    const b=document.getElementById("simCine");
+    if(b){ b.textContent = on?"🎬 영상 모드 ON":"🎬 영상 모드"; b.classList.toggle("on", on); }
+  },
+  cinemaOff(){
+    const e=this.engine;
+    if(!e||!e.cinema) return;
+    e.setCinema(false); e.setBright(false);
+    const b=document.getElementById("simCine");
+    if(b){ b.textContent="🎬 영상 모드"; b.classList.remove("on"); }
+  },
+
   /* 재생 속도 0.5× → 1× → 2× 순환 (설명용 저속 / 개요용 고속) */
   cycleSpeed(){
     const SP=[0.5,1,2];
